@@ -1,129 +1,149 @@
 package main
 
 import (
-	"flag"
+	"encoding/json"
 	"fmt"
-	"image"
-	_ "image/png" // Register PNG format
+	"io/ioutil"
 	"net/http"
 	"os"
 	"time"
+
+	"gocv.io/x/gocv"
 )
 
-func toRGBA(img image.Image) *image.RGBA {
-	bounds := img.Bounds()
-	rgba := image.NewRGBA(bounds)
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			rgba.Set(x, y, img.At(x, y))
-		}
-	}
-	return rgba
+type ImagePair struct {
+	BaseURL string `json:"baseURL"`
+	CompURL string `json:"compURL"`
 }
 
-func downloadImage(url string) (image.Image, error) {
+type InputData struct {
+	Urls []ImagePair `json:"urls"`
+}
 
+// downloadImage downloads an image from a URL and decodes it into a gocv.Mat
+func downloadImage(url string) (gocv.Mat, error) {
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 	}
 
 	resp, err := client.Get(url)
 	if err != nil {
-		return nil, fmt.Errorf("error downloading image from %s: %v", url, err)
+		return gocv.NewMat(), fmt.Errorf("error downloading image from %s: %v", url, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to download image from %s: status code %d", url, resp.StatusCode)
+		return gocv.NewMat(), fmt.Errorf("failed to download image from %s: status code %d", url, resp.StatusCode)
 	}
 
-	img, _, err := image.Decode(resp.Body)
+	data, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("error decoding image from %s: %v", url, err)
+		return gocv.NewMat(), fmt.Errorf("error reading response body from %s: %v", url, err)
+	}
+
+	img, err := gocv.IMDecode(data, gocv.IMReadColor)
+	if err != nil {
+		return gocv.NewMat(), fmt.Errorf("error decoding image from %s: %v", url, err)
 	}
 
 	return img, nil
 }
 
-func compareImages(img1, img2 *image.RGBA) (int, error) {
-
-	bounds1 := img1.Bounds()
-
-	width := bounds1.Dx()
-	height := bounds1.Dy()
-	stride := img1.Stride
-	pix1 := img1.Pix
-	pix2 := img2.Pix
+func compareImages(img1, img2 gocv.Mat) int {
 
 	mismatchedPixels := 0
-	channels := 4
+	rows, cols, channels := img1.Rows(), img1.Cols(), img1.Channels()
 
-	for y := 0; y < height; y++ {
-		offset1 := y * stride
-		offset2 := y * stride
-		for x := 0; x < width; x++ {
-			base1 := offset1 + x*channels
-			base2 := offset2 + x*channels
+	// GO_CV version
+	// for y := 0; y < rows; y++ {
+	// 	for x := 0; x < cols; x++ {
 
-			// Check if pixel indices are valid
-			if base1+3 >= len(pix1) || base2+3 >= len(pix2) {
-				continue // Skip invalid pixels
-			}
-
-			// Compare pixel channels
-			if pix1[base1] != pix2[base2] || pix1[base1+1] != pix2[base2+1] ||
-				pix1[base1+2] != pix2[base2+2] || pix1[base1+3] != pix2[base2+3] {
-				mismatchedPixels++
-			}
-		}
-	}
-
-	return mismatchedPixels, nil
-}
-
-func main() {
-
-	totalStart := time.Now()
-
-	flag.Parse()
-
-	url1 := flag.Arg(0)
-	url2 := flag.Arg(1)
-
-	img1, err := downloadImage(url1)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	img2, err := downloadImage(url2)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	mismatches, err := compareImages(toRGBA(img1), toRGBA(img2))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error during comparison: %v\n", err)
-		os.Exit(1)
-	}
-
-	totalDuration := time.Since(totalStart)
-
-	fmt.Printf("Mismatched Pixels: %d\n", mismatches)
-	fmt.Printf("Total Execution Time in go : %.6f seconds\n", totalDuration.Seconds())
-
-	// totalStart = time.Now()
-
-	// for i := 0; i < 101; i++ {
-	// 	_, err := compareImages(toRGBA(img1), toRGBA(img2))
-	// 	if err != nil {
-	// 		fmt.Fprintf(os.Stderr, "Error during comparison: %v\n", err)
-	// 		os.Exit(1)
+	// 		pixel1 := img1.GetVecbAt(y, x)
+	// 		pixel2 := img2.GetVecbAt(y, x)
+	// 		mismatch := false
+	// 		for c := 0; c < channels; c++ {
+	// 			if pixel1[c] != pixel2[c] {
+	// 				mismatch = true
+	// 				break
+	// 			}
+	// 		}
+	// 		if mismatch {
+	// 			mismatchedPixels++
+	// 		}
 	// 	}
 	// }
 
-	// totalDuration = time.Since(totalStart)
-	// fmt.Printf("Total Execution Time in go for 100 screenshots : %.6f seconds\n", totalDuration.Seconds())
+	// DIRECT_PIXEL
+	data1 := img1.ToBytes()
+	data2 := img2.ToBytes()
 
+	// Iterate over raw pixel data
+	for i := 0; i < rows*cols*channels; i += channels {
+		mismatch := false
+		for c := 0; c < channels; c++ {
+			if data1[i+c] != data2[i+c] {
+				mismatch = true
+				break
+			}
+		}
+		if mismatch {
+			mismatchedPixels++
+		}
+	}
+
+	return mismatchedPixels
+}
+
+func main() {
+	// Load JSON file
+	file, err := os.Open("urls.json")
+	if err != nil {
+		fmt.Println("Error opening JSON file:", err)
+		return
+	}
+	defer file.Close()
+
+	var input InputData
+	if err := json.NewDecoder(file).Decode(&input); err != nil {
+		fmt.Println("Error decoding JSON:", err)
+		return
+	}
+
+	// Load images into memory
+	var imagePairs []struct {
+		Base, Comp gocv.Mat
+	}
+	counter := 0
+	for _, pair := range input.Urls {
+		if counter > 10 {
+			break
+		}
+		counter++
+
+		img1, err := downloadImage(pair.BaseURL)
+		if err != nil {
+			fmt.Println("Error downloading base image:", err)
+			return
+		}
+		img2, err := downloadImage(pair.CompURL)
+		if err != nil {
+			fmt.Println("Error downloading comparison image:", err)
+			return
+		}
+		imagePairs = append(imagePairs, struct {
+			Base, Comp gocv.Mat
+		}{img1, img2})
+	}
+
+	fmt.Println("Image loading completed")
+
+	// Benchmark comparison
+	start := time.Now()
+
+	for _, pair := range imagePairs {
+		_ = compareImages(pair.Base, pair.Comp)
+	}
+
+	duration := time.Since(start)
+	fmt.Printf("Total Execution Time: %.6f seconds\n", duration.Seconds())
 }

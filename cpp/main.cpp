@@ -4,6 +4,10 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include <fstream>
+#include <nlohmann/json.hpp>
+
+using json = nlohmann::json;
 
  size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
     size_t totalSize = size * nmemb;
@@ -38,92 +42,95 @@ bool downloadImage(const std::string& url, std::vector<uchar>& imageData) {
     return true;
 }
 
-int countMismatchedPixels(const cv::Mat& img1, const cv::Mat& img2) {
-    
-    int rows = img1.rows;
-    int cols = img1.cols;
-    int channels = img1.channels();
+int compareImages(const cv::Mat& img1, const cv::Mat& img2) {
     int mismatchedPixels = 0;
 
-    const uchar* ptr1 = img1.ptr<uchar>(0);
-    const uchar* ptr2 = img2.ptr<uchar>(0);
-    size_t totalPixels = static_cast<size_t>(rows) * cols;
+    int width = img1.cols;
+    int height = img1.rows;
+    int channels = img1.channels();
 
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
 
-    for (size_t i = 0; i < totalPixels; ++i) {
-        bool mismatch = false;
-        for (int c = 0; c < channels; ++c) {
-            if (ptr1[i * channels + c] != ptr2[i * channels + c]) {
-                mismatch = true;
-                break;
+            if (y >= img1.rows || x >= img1.cols || y >= img2.rows || x >= img2.cols) {
+                continue; 
+            }
+        
+            const uchar* pixel1 = img1.ptr<uchar>(y) + x * channels;
+            const uchar* pixel2 = img2.ptr<uchar>(y) + x * channels;
+
+            bool mismatch = false;
+            for (int c = 0; c < channels; ++c) {
+                if (pixel1[c] != pixel2[c]) {
+                    mismatch = true;
+                    break;
+                }
+            }
+            if (mismatch) {
+                mismatchedPixels++;
             }
         }
-        if (mismatch) {
-            mismatchedPixels++;
-        }
     }
+
+    for (int i =0; i < )
 
     return mismatchedPixels;
 }
 
 int main(int argc, char* argv[]) {
+  
+    // Load JSON file
+    std::ifstream jsonFile("urls.json");
+    if (!jsonFile.is_open()) {
+        std::cerr << "Failed to open JSON file.\n";
+        return EXIT_FAILURE;
+    }
 
-    
-    auto start = std::chrono::high_resolution_clock::now();
+    json jsonData;
+    jsonFile >> jsonData;
 
-    std::string url1 = argv[1];
-    std::string url2 = argv[2];
-    std::vector<uchar> imageData1, imageData2;
+    std::vector<std::pair<cv::Mat, cv::Mat>> imagePairs;
 
-     
+    // Load images into memory
     curl_global_init(CURL_GLOBAL_DEFAULT);
+    int counter = 0;
+    for (const auto& pair : jsonData["urls"]) {
+        if (counter > 10) break;
+        counter++;
 
-   
-    if (!downloadImage(url1, imageData1)) {
-        std::cerr << "Failed to download image from " << url1 << "\n";
-        return EXIT_FAILURE;
+        std::vector<uchar> imageData1, imageData2;
+        if (!downloadImage(pair["baseURL"], imageData1)) {
+            std::cerr << "Failed to download base image.\n";
+            return EXIT_FAILURE;
+        }
+        if (!downloadImage(pair["compURL"], imageData2)) {
+            std::cerr << "Failed to download comparison image.\n";
+            return EXIT_FAILURE;
+        }
+
+        cv::Mat img1 = cv::imdecode(imageData1, cv::IMREAD_COLOR);
+        cv::Mat img2 = cv::imdecode(imageData2, cv::IMREAD_COLOR);
+
+        if (img1.empty() || img2.empty()) {
+            std::cerr << "Failed to decode images.\n";
+            return EXIT_FAILURE;
+        }
+        imagePairs.emplace_back(img1, img2);
     }
+    std::cout << "Loading completed " << imagePairs.size() << std::endl; 
 
+    // Benchmark pixel comparison
+    auto start = std::chrono::high_resolution_clock::now();
+    int sum = 0;
 
-    if (!downloadImage(url2, imageData2)) {
-        std::cerr << "Failed to download image from " << url2 << "\n";
-        return EXIT_FAILURE;
-    }
-
-
-    cv::Mat img1 = cv::imdecode(imageData1, cv::IMREAD_COLOR);
-    cv::Mat img2 = cv::imdecode(imageData2, cv::IMREAD_COLOR);
-
-    if (img1.empty()) {
-        std::cerr << "Failed to decode image from " << url1 << "\n";
-        return EXIT_FAILURE;
-    }
-
-    if (img2.empty()) {
-        std::cerr << "Failed to decode image from " << url2 << "\n";
-        return EXIT_FAILURE;
-    }
-
-    int mismatchedPixels = countMismatchedPixels(img1, img2);
-    std::cout << mismatchedPixels << std::endl;
-
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> diff = end - start;
-
-
-    std::cout << "Mismatched Pixels: " << mismatchedPixels << "\n";
-    std::cout << "Time Taken in cpp: " << diff.count() << " seconds\n";
-
-
-    start = std::chrono::high_resolution_clock::now();
-
-    for(int i=0;i<2;i++){
+    for (const auto& [img1, img2] : imagePairs) {
         int mismatchedPixels = countMismatchedPixels(img1, img2);
+        sum += mismatchedPixels;
     }
-
-    end = std::chrono::high_resolution_clock::now();
-    diff = end - start;
-    std::cout << "Time Taken in cpp for 100 screenshots : " << diff.count() << " seconds\n";
+    std::cout << sum << std::endl;
+    auto end = std::chrono::high_resolution_clock::now();
+    auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    std::cout << "Total Time Taken: " << diff.count() << " ms\n";
 
     curl_global_cleanup();
     return 0;
